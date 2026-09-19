@@ -1,10 +1,10 @@
 """
-Generador de Embeddings Vectoriales para Scout AI (Amazon Bedrock)
-==================================================================
-Este script toma el archivo '../data/perfiles_procesados.json' y genera
-representaciones vectoriales (embeddings) para cada jugador usando
-el modelo 'amazon.titan-embed-text-v2:0' de Amazon Bedrock en 'us-east-1'.
-El resultado final se exporta en '../data/perfiles_con_vectores.json'.
+Vector Embeddings Generator for Scout AI (Amazon Bedrock)
+==========================================================
+This script ingests '../data/perfiles_procesados.json' and generates dense vector
+embeddings for each player's natural language 'text_profile' using
+'amazon.titan-embed-text-v2:0' via Amazon Bedrock Runtime in 'us-east-1'.
+The enriched records are saved to '../data/perfiles_con_vectores.json'.
 """
 
 import os
@@ -16,7 +16,7 @@ from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 
-# Asegurar compatibilidad de salida UTF-8 en terminales de Windows
+# Ensure UTF-8 output encoding across Windows consoles
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -24,14 +24,14 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
         pass
 
 
-def resolver_rutas() -> tuple[Path, Path, Path]:
+def resolve_paths() -> tuple[Path, Path, Path]:
     """
-    Resuelve las rutas de entrada, salida y respaldo temporal de forma dinámica,
-    permitiendo la ejecución desde la raíz del proyecto o desde app/scripts/.
+    Dynamically resolves paths for input, output, and safety checkpoint files,
+    allowing execution from any working directory (project root, app/, or scripts/).
     """
     script_dir = Path(__file__).resolve().parent
     
-    candidatos_input = [
+    input_candidates = [
         script_dir.parent / "data" / "perfiles_procesados.json",
         Path("../data/perfiles_procesados.json"),
         Path("app/data/perfiles_procesados.json"),
@@ -39,7 +39,7 @@ def resolver_rutas() -> tuple[Path, Path, Path]:
     ]
     
     input_path = None
-    for p in candidatos_input:
+    for p in input_candidates:
         if p.exists():
             input_path = p.resolve()
             break
@@ -53,36 +53,35 @@ def resolver_rutas() -> tuple[Path, Path, Path]:
     return input_path, output_path, temp_path
 
 
-def guardar_json(data: list[dict], path: Path, descripcion: str = ""):
-    """Guarda una lista de diccionarios en JSON de forma segura."""
+def save_json(data: list[dict], path: Path, description: str = ""):
+    """Safely dumps a list of player dictionaries to a JSON file."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        if descripcion:
-            print(f"[+] {descripcion} guardado con éxito ({len(data)} jugadores) en: {path.name}")
+        if description:
+            print(f"[+] {description} saved successfully ({len(data)} players) to: {path.name}")
     except Exception as e:
-        print(f"[ERROR] No se pudo guardar el archivo '{path}': {e}")
+        print(f"[ERROR] Failed to save JSON file '{path}': {e}")
 
 
-def obtener_embedding(
+def get_embedding(
     client,
-    texto: str,
+    text: str,
     model_id: str = "amazon.titan-embed-text-v2:0",
     max_retries: int = 3
 ) -> list[float]:
     """
-    Invoca Amazon Bedrock Runtime para obtener el vector de embedding.
-    Implementa reintentos exponenciales en caso de throttling temporal de AWS.
+    Calls Amazon Bedrock Runtime to retrieve the vector embedding for the input text.
+    Implements exponential backoff to handle temporary AWS API throttling.
     """
-    # Payload optimizado para Titan Embeddings Text v2 (1024 dimensiones, normalizado)
     body = json.dumps({
-        "inputText": texto,
+        "inputText": text,
         "dimensions": 1024,
         "normalize": True
     })
 
-    for intento in range(max_retries):
+    for attempt in range(max_retries):
         try:
             response = client.invoke_model(
                 modelId=model_id,
@@ -95,222 +94,232 @@ def obtener_embedding(
             if embedding and isinstance(embedding, list):
                 return embedding
             else:
-                raise ValueError("La respuesta de Bedrock no contiene una clave 'embedding' válida.")
+                raise ValueError("Bedrock response missing valid 'embedding' field.")
                 
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
-            # Manejo de Throttling (límite de peticiones por segundo en AWS)
+            # Handle rate-limit throttling from AWS Bedrock
             if error_code in ["ThrottlingException", "RequestLimitExceeded", "TooManyRequestsException"]:
-                wait_time = (intento + 1) * 2.0
-                print(f"    [!] Throttling detectado ({error_code}). Pausando {wait_time:.1f}s antes de reintentar...")
+                wait_time = (attempt + 1) * 2.0
+                print(f"    [!] Throttling encountered ({error_code}). Backing off for {wait_time:.1f}s...")
                 time.sleep(wait_time)
             else:
                 raise e
         except Exception as e:
-            if intento < max_retries - 1:
+            if attempt < max_retries - 1:
                 time.sleep(1.5)
             else:
                 raise e
 
-    raise RuntimeError(f"Fallo al obtener embedding tras {max_retries} intentos.")
+    raise RuntimeError(f"Failed to obtain embedding after {max_retries} attempts.")
 
 
-def generar_vectores(
+def generate_vectors(
     region_name: str = "us-east-1",
     model_id: str = "amazon.titan-embed-text-v2:0",
-    delay_segundos: float = 0.15,
-    limite: int | None = None,
-    guardar_cada: int = 50
+    delay_seconds: float = 0.15,
+    limit: int | None = None,
+    save_every: int = 50
 ):
     """
-    Flujo principal de generación de vectores para la base de datos de Scout AI.
+    Main execution pipeline for generating and indexing player embeddings with Bedrock.
     """
     print("=" * 70)
-    print("🧠 [Scout AI] Iniciando generación de vectores con Amazon Bedrock")
+    print("🧠 [Scout AI] Starting Vector Embedding Pipeline (Amazon Bedrock)")
     print("=" * 70)
-    print(f"[+] Región de AWS:     {region_name}")
-    print(f"[+] Modelo de Bedrock: {model_id}")
-    print(f"[+] Pausa preventiva:  {delay_segundos}s por petición")
+    print(f"[+] AWS Region:     {region_name}")
+    print(f"[+] Bedrock Model:  {model_id}")
+    print(f"[+] Safety Delay:   {delay_seconds}s per request")
     
-    # 1. Resolver rutas de archivos
-    input_path, output_path, temp_path = resolver_rutas()
-    print(f"[+] Archivo origen:    {input_path}")
-    print(f"[+] Archivo destino:   {output_path}")
-    print(f"[+] Archivo temporal:  {temp_path}")
+    # 1. Resolve file paths
+    input_path, output_path, temp_path = resolve_paths()
+    print(f"[+] Source input:   {input_path}")
+    print(f"[+] Target output:  {output_path}")
+    print(f"[+] Checkpoint file:{temp_path}")
 
     if not input_path.exists():
-        print(f"\n[ERROR] No existe el archivo de entrada '{input_path}'.")
-        print("Por favor ejecuta primero: python process_players.py")
+        print(f"\n[ERROR] Input file not found: '{input_path}'.")
+        print("Please run first: python process_players.py")
         sys.exit(1)
 
-    # 2. Cargar perfiles procesados
+    # 2. Load preprocessed player profiles
     try:
         with open(input_path, "r", encoding="utf-8") as f:
-            perfiles = json.load(f)
+            profiles = json.load(f)
     except Exception as e:
-        print(f"[ERROR] Error al leer '{input_path}': {e}")
+        print(f"[ERROR] Failed to read '{input_path}': {e}")
         sys.exit(1)
 
-    total_jugadores = len(perfiles)
-    print(f"[+] Perfiles cargados: {total_jugadores} jugadores encontrados.")
+    total_players = len(profiles)
+    print(f"[+] Profiles loaded: {total_players} players found.")
 
-    if limite and limite < total_jugadores:
-        perfiles = perfiles[:limite]
-        total_jugadores = len(perfiles)
-        print(f"[!] Límite de prueba activo: Se procesarán únicamente los primeros {limite} jugadores.")
+    if limit and limit < total_players:
+        profiles = profiles[:limit]
+        total_players = len(profiles)
+        print(f"[!] Test limit enabled: Processing only the first {limit} players.")
 
-    # 3. Soporte para reanudar progreso si ya existe trabajo previo (Checkpoints)
-    jugadores_con_vectores = []
-    ids_ya_procesados = set()
+    # 3. Resume from previous checkpoints if available
+    vectorized_players = []
+    already_processed_ids = set()
 
-    # Si existe un archivo temporal o de salida previo, recuperar los ya calculados para ahorrar costos y tiempo
-    archivo_recuperacion = temp_path if temp_path.exists() else (output_path if output_path.exists() else None)
-    if archivo_recuperacion and archivo_recuperacion.exists():
+    recovery_file = temp_path if temp_path.exists() else (output_path if output_path.exists() else None)
+    if recovery_file and recovery_file.exists():
         try:
-            with open(archivo_recuperacion, "r", encoding="utf-8") as f:
-                previos = json.load(f)
-                for p in previos:
+            with open(recovery_file, "r", encoding="utf-8") as f:
+                previous_records = json.load(f)
+                for p in previous_records:
                     if "id" in p and "vector" in p and p["vector"]:
-                        ids_ya_procesados.add(str(p["id"]))
-                        jugadores_con_vectores.append(p)
-            if ids_ya_procesados:
-                print(f"[+] Recuperados {len(ids_ya_procesados)} jugadores previamente procesados de '{archivo_recuperacion.name}'.")
+                        already_processed_ids.add(str(p["id"]))
+                        vectorized_players.append(p)
+            if already_processed_ids:
+                print(f"[+] Resumed {len(already_processed_ids)} previously vectorized players from '{recovery_file.name}'.")
         except Exception:
             pass
 
-    # 4. Inicializar cliente de Amazon Bedrock Runtime
+    # 4. Initialize Amazon Bedrock Runtime Client
     try:
         client = boto3.client("bedrock-runtime", region_name=region_name)
     except Exception as e:
-        print(f"[ERROR] No se pudo inicializar el cliente de boto3 para Bedrock: {e}")
+        print(f"[ERROR] Failed to initialize Bedrock client via boto3: {e}")
         sys.exit(1)
 
-    # 5. Iteración y generación de embeddings
+    # 5. Iterative embedding generation
     print("-" * 70)
-    print(f"🚀 Procesando embeddings para {total_jugadores} jugadores...")
+    print(f"🚀 Generating embeddings for {total_players} players...")
     print("-" * 70)
 
-    inicio_tiempo = time.time()
-    errores_consecutivos = 0
+    start_time = time.time()
+    consecutive_errors = 0
 
-    for idx, jugador in enumerate(perfiles, start=1):
-        jugador_id = str(jugador.get("id", idx))
-        nombre = jugador.get("Player", f"ID {jugador_id}")
-        texto = jugador.get("text_profile", "").strip()
+    try:
+        for idx, player in enumerate(profiles, start=1):
+            player_id = str(player.get("id", idx))
+            player_name = player.get("Player", f"ID {player_id}")
+            text_profile = player.get("text_profile", "").strip()
 
-        # Si ya fue vectorizado en una ejecución previa, reutilizar
-        if jugador_id in ids_ya_procesados:
-            continue
-
-        if not texto:
-            print(f"[!] Jugador {nombre} (id: {jugador_id}) no tiene 'text_profile'. Se omite.")
-            continue
-
-        try:
-            # Llamada al modelo de embeddings en Amazon Bedrock
-            vector = obtener_embedding(client, texto, model_id=model_id)
-
-            # Crear copia del registro incorporando el vector
-            jugador_actualizado = dict(jugador)
-            jugador_actualizado["vector"] = vector
-            jugadores_con_vectores.append(jugador_actualizado)
-            ids_ya_procesados.add(jugador_id)
-            errores_consecutivos = 0
-
-        except Exception as e:
-            errores_consecutivos += 1
-            print(f"\n[ERROR] Fallo al vectorizar jugador {idx}/{total_jugadores} ({nombre}): {e}")
-            print("💾 Guardando punto de control de seguridad (checkpoint temporal)...")
-            guardar_json(jugadores_con_vectores, temp_path, "Punto de control de seguridad")
-
-            # Si se producen varios errores consecutivos (ej: credenciales inválidas o sin permisos de Bedrock)
-            if errores_consecutivos >= 3:
-                print(f"\n[ABORTANDO] Se alcanzaron {errores_consecutivos} errores consecutivos con AWS Bedrock.")
-                print(f"Los jugadores procesados hasta ahora ({len(jugadores_con_vectores)}) están seguros en '{temp_path.name}'.")
-                sys.exit(1)
-            else:
-                print("Continuando con el siguiente jugador...")
+            # Skip if already vectorized
+            if player_id in already_processed_ids:
                 continue
 
-        # Mensaje de progreso periódico (cada 50 o 100 jugadores)
-        if idx % guardar_cada == 0 or idx == total_jugadores:
-            porcentaje = (idx / total_jugadores) * 100
-            tiempo_transcurrido = time.time() - inicio_tiempo
-            velocidad = idx / tiempo_transcurrido if tiempo_transcurrido > 0 else 0
-            restantes = total_jugadores - idx
-            tiempo_estimado = (restantes / velocidad) if velocidad > 0 else 0
+            if not text_profile:
+                print(f"[!] Player {player_name} (id: {player_id}) has empty 'text_profile'. Skipping.")
+                continue
 
-            print(
-                f"[Progreso] {idx}/{total_jugadores} ({porcentaje:.1f}%) | "
-                f"Velocidad: {velocidad:.1f} jug/s | Est. restante: {tiempo_estimado/60:.1f} min"
-            )
+            try:
+                # Call Amazon Bedrock Titan Text Embeddings v2
+                vector = get_embedding(client, text_profile, model_id=model_id)
 
-            # Guardar respaldo temporal periódicamente
-            guardar_json(jugadores_con_vectores, temp_path, "Checkpoint periódico")
+                updated_record = dict(player)
+                updated_record["vector"] = vector
+                vectorized_players.append(updated_record)
+                already_processed_ids.add(player_id)
+                consecutive_errors = 0
 
-        # Pausa para evitar Throttling en la API de Amazon Bedrock
-        time.sleep(delay_segundos)
+            except Exception as e:
+                consecutive_errors += 1
+                print(f"\n[ERROR] Failed to vectorize player {idx}/{total_players} ({player_name}): {e}")
+                print("💾 Saving safety checkpoint...")
+                save_json(vectorized_players, temp_path, "Safety checkpoint")
 
-    # 6. Guardar archivo final
+                if consecutive_errors >= 3:
+                    print(f"\n[ABORTING] Reached {consecutive_errors} consecutive AWS Bedrock errors.")
+                    print(f"Progress ({len(vectorized_players)} players) safely saved to '{temp_path.name}'.")
+                    sys.exit(1)
+                else:
+                    print("Continuing with next player...")
+                    continue
+
+            # Periodic progress reporting
+            if idx % save_every == 0 or idx == total_players:
+                pct = (idx / total_players) * 100
+                elapsed = time.time() - start_time
+                speed = idx / elapsed if elapsed > 0 else 0
+                remaining = total_players - idx
+                eta_minutes = (remaining / speed) / 60 if speed > 0 else 0
+
+                print(
+                    f"[Progress] {idx}/{total_players} ({pct:.1f}%) | "
+                    f"Speed: {speed:.1f} players/s | ETA: {eta_minutes:.1f} min"
+                )
+
+                # Periodic checkpoint save
+                save_json(vectorized_players, temp_path, "Periodic checkpoint")
+
+            # Anti-throttling safety pause
+            time.sleep(delay_seconds)
+
+    except KeyboardInterrupt:
+        print("\n\n[!] Process interrupted by user (KeyboardInterrupt).")
+        print("💾 Saving current progress to checkpoint file...")
+        save_json(vectorized_players, temp_path, "Interrupted state checkpoint")
+        print(f"[+] Safely preserved {len(vectorized_players)} vectorized players.")
+        print(f"[+] Re-run this script to resume exactly where you left off!")
+        sys.exit(0)
+
+    # 6. Save final output
     print("=" * 70)
-    print(f"💾 Guardando resultado final en: '{output_path}'...")
-    guardar_json(jugadores_con_vectores, output_path, "Archivo final con vectores")
+    print(f"💾 Saving final vector dataset to: '{output_path}'...")
+    save_json(vectorized_players, output_path, "Final vectorized dataset")
 
-    # Limpiar archivo temporal si todo finalizó con éxito
-    if temp_path.exists() and len(jugadores_con_vectores) == total_jugadores:
+    # Clean up temp file on successful completion
+    if temp_path.exists() and len(vectorized_players) == total_players:
         try:
             temp_path.unlink()
-            print("[+] Archivo temporal de respaldo limpiado con éxito.")
+            print("[+] Temporary checkpoint file removed.")
         except Exception:
             pass
 
-    tiempo_total = time.time() - inicio_tiempo
+    total_time = time.time() - start_time
     print("-" * 70)
-    print(f"🎉 [EXITO] Proceso finalizado en {tiempo_total/60:.2f} minutos.")
-    print(f"[+] Total de jugadores vectorizados: {len(jugadores_con_vectores)}/{total_jugadores}")
-    print(f"[+] Dimensión del vector generado:  {len(jugadores_con_vectores[0]['vector']) if jugadores_con_vectores else 0}")
-    print(f"[+] Archivo final listo en:         {output_path}")
+    print(f"🎉 [SUCCESS] Pipeline completed in {total_time/60:.2f} minutes.")
+    print(f"[+] Total players vectorized: {len(vectorized_players)}/{total_players}")
+    print(f"[+] Vector dimensions:       {len(vectorized_players[0]['vector']) if vectorized_players else 0}")
+    print(f"[+] Output ready at:         {output_path}")
     print("=" * 70)
 
 
+# Backward-compatible alias
+generar_vectores = generate_vectors
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generador de Embeddings para Scout AI con Amazon Bedrock")
+    parser = argparse.ArgumentParser(description="Scout AI Vector Embeddings Generator with Amazon Bedrock")
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="Límite opcional de jugadores a procesar (ej: --limit 5 para pruebas rápidas)"
+        help="Optional limit on players to process (e.g. --limit 5 for fast testing)"
     )
     parser.add_argument(
         "--delay",
         type=float,
         default=0.15,
-        help="Pausa en segundos entre llamadas para evitar Throttling (por defecto 0.15s)"
+        help="Delay in seconds between calls to avoid throttling (default: 0.15s)"
     )
     parser.add_argument(
         "--batch-save",
         type=int,
         default=50,
-        help="Frecuencia con la que se imprime el progreso y se guarda el checkpoint (por defecto 50)"
+        help="Interval for logging progress and saving checkpoints (default: 50)"
     )
     parser.add_argument(
         "--model-id",
         type=str,
         default="amazon.titan-embed-text-v2:0",
-        help="ID del modelo de embeddings en Bedrock (por defecto amazon.titan-embed-text-v2:0)"
+        help="Bedrock embedding model ID (default: amazon.titan-embed-text-v2:0)"
     )
     parser.add_argument(
         "--region",
         type=str,
         default="us-east-1",
-        help="Región de AWS (por defecto us-east-1)"
+        help="AWS Region (default: us-east-1)"
     )
     args = parser.parse_args()
 
-    generar_vectores(
+    generate_vectors(
         region_name=args.region,
         model_id=args.model_id,
-        delay_segundos=args.delay,
-        limite=args.limit,
-        guardar_cada=args.batch_save
+        delay_seconds=args.delay,
+        limit=args.limit,
+        save_every=args.batch_save
     )

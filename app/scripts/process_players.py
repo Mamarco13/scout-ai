@@ -1,9 +1,10 @@
 """
-Script de Procesamiento de Jugadores para Scout AI (AWS Hackathon)
-===================================================================
-Este script lee el archivo de estadísticas de jugadores, limpia los datos,
-filtra por partidos jugados, genera perfiles textuales en lenguaje natural (español)
-optimizados para embeddings / AWS Bedrock / OpenSearch, y los exporta en formato JSON.
+Player Data Processing Script for Scout AI (AWS Hackathon)
+===========================================================
+This script reads football player statistical data from CSV, cleans and normalizes
+the records, filters players based on match involvement, generates comprehensive
+natural language profiles in English (optimized for Amazon Bedrock / Titan Embeddings),
+and exports the dataset to JSON.
 """
 
 import os
@@ -15,7 +16,7 @@ import argparse
 from pathlib import Path
 import pandas as pd
 
-# Asegurar compatibilidad de salida UTF-8 en consolas Windows
+# Ensure UTF-8 output encoding across Windows consoles
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -23,30 +24,29 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
         pass
 
 
-# Mapeo de posiciones a términos en español
+# Position code mapping to English descriptive terminology
 POS_MAP = {
-    'GK': 'Portero',
-    'DF': 'Defensa',
-    'MF': 'Centrocampista',
-    'FW': 'Delantero',
-    'DF,MF': 'Defensa / Centrocampista',
-    'MF,DF': 'Centrocampista / Defensa',
-    'MF,FW': 'Centrocampista / Delantero',
-    'FW,MF': 'Delantero / Centrocampista',
-    'DF,FW': 'Defensa / Delantero',
-    'FW,DF': 'Delantero / Defensa',
+    'GK': 'Goalkeeper',
+    'DF': 'Defender',
+    'MF': 'Midfielder',
+    'FW': 'Forward',
+    'DF,MF': 'Defender / Midfielder',
+    'MF,DF': 'Midfielder / Defender',
+    'MF,FW': 'Midfielder / Forward',
+    'FW,MF': 'Forward / Midfielder',
+    'DF,FW': 'Defender / Forward',
+    'FW,DF': 'Forward / Defender',
 }
 
 
-def resolver_rutas() -> tuple[Path, Path]:
+def resolve_paths() -> tuple[Path, Path]:
     """
-    Resuelve las rutas de los archivos de entrada y salida de forma robusta,
-    permitiendo la ejecución tanto desde la raíz del proyecto como desde scripts/.
+    Resolves input and output file paths dynamically, allowing
+    execution from any working directory (project root, app/, or scripts/).
     """
     script_dir = Path(__file__).resolve().parent
     
-    # Lista de posibles ubicaciones del archivo CSV
-    csv_candidatos = [
+    csv_candidates = [
         script_dir.parent / "data" / "jugadores_stats.csv",
         Path("../data/jugadores_stats.csv"),
         Path("app/data/jugadores_stats.csv"),
@@ -54,7 +54,7 @@ def resolver_rutas() -> tuple[Path, Path]:
     ]
     
     csv_path = None
-    for p in csv_candidatos:
+    for p in csv_candidates:
         if p.exists():
             csv_path = p.resolve()
             break
@@ -66,32 +66,32 @@ def resolver_rutas() -> tuple[Path, Path]:
     return csv_path, json_path
 
 
-def detectar_separador_y_encoding(ruta_archivo: Path) -> tuple[str, str]:
+def detect_separator_and_encoding(file_path: Path) -> tuple[str, str]:
     """
-    Detecta automáticamente el delimitador (coma, punto y coma, tabulador, etc.)
-    y la codificación óptima para evitar errores de lectura.
+    Automatically detects the CSV delimiter (comma, semicolon, tab, pipe)
+    and optimal file encoding to prevent parsing errors.
     """
-    delimitadores = [',', ';', '\t', '|']
+    delimiters = [',', ';', '\t', '|']
     encodings = ['utf-8', 'latin-1', 'cp1252', 'utf-8-sig']
     
     for encoding in encodings:
         try:
-            with open(ruta_archivo, 'r', encoding=encoding, errors='strict') as f:
-                muestra = f.read(4096)
-                if not muestra:
+            with open(file_path, 'r', encoding=encoding, errors='strict') as f:
+                sample = f.read(4096)
+                if not sample:
                     continue
                 
-                # Intentar detección con csv.Sniffer
+                # Attempt sniffing via csv.Sniffer
                 try:
                     sniffer = csv.Sniffer()
-                    dialect = sniffer.sniff(muestra, delimiters=',;\t|')
+                    dialect = sniffer.sniff(sample, delimiters=',;\t|')
                     return dialect.delimiter, encoding
                 except Exception:
-                    primera_linea = muestra.splitlines()[0] if muestra.splitlines() else ''
-                    conteos = {d: primera_linea.count(d) for d in delimitadores}
-                    delimitador = max(conteos, key=conteos.get)
-                    if conteos[delimitador] > 0:
-                        return delimitador, encoding
+                    first_line = sample.splitlines()[0] if sample.splitlines() else ''
+                    counts = {d: first_line.count(d) for d in delimiters}
+                    best_delim = max(counts, key=counts.get)
+                    if counts[best_delim] > 0:
+                        return best_delim, encoding
                     return ',', encoding
         except (UnicodeDecodeError, UnicodeError):
             continue
@@ -99,26 +99,26 @@ def detectar_separador_y_encoding(ruta_archivo: Path) -> tuple[str, str]:
     return ',', 'latin-1'
 
 
-def buscar_columna(df: pd.DataFrame, nombres_posibles: list[str]) -> str | None:
-    """Busca una columna en el DataFrame ignorando mayúsculas/minúsculas y espacios."""
+def find_column(df: pd.DataFrame, possible_names: list[str]) -> str | None:
+    """Finds a matching column in the DataFrame ignoring case and surrounding whitespace."""
     cols_lower = {c.strip().lower(): c for c in df.columns}
-    for nombre in nombres_posibles:
-        nombre_clean = nombre.strip().lower()
-        if nombre_clean in cols_lower:
-            return cols_lower[nombre_clean]
+    for name in possible_names:
+        clean_name = name.strip().lower()
+        if clean_name in cols_lower:
+            return cols_lower[clean_name]
     return None
 
 
-def limpiar_cadena(val: any, default: str = "") -> str:
-    """Limpia cadenas manejando valores nulos o NaN."""
+def clean_str(val: any, default: str = "") -> str:
+    """Cleans string values handling NaN and null representations."""
     if pd.isna(val) or val is None:
         return default
     val_str = str(val).strip()
     return val_str if val_str and val_str.lower() != 'nan' else default
 
 
-def limpiar_entero(val: any, default: int = 0) -> int:
-    """Convierte de forma segura valores numéricos flotantes/nulos a enteros."""
+def clean_int(val: any, default: int = 0) -> int:
+    """Safely casts numeric/float/null values to integer."""
     if pd.isna(val) or val is None:
         return default
     try:
@@ -127,8 +127,8 @@ def limpiar_entero(val: any, default: int = 0) -> int:
         return default
 
 
-def limpiar_flotante(val: any, default: float = 0.0) -> float:
-    """Convierte de forma segura valores numéricos a flotantes."""
+def clean_float(val: any, default: float = 0.0) -> float:
+    """Safely casts numeric values to float."""
     if pd.isna(val) or val is None:
         return default
     try:
@@ -137,194 +137,195 @@ def limpiar_flotante(val: any, default: float = 0.0) -> float:
         return default
 
 
-def formatear_nacion(nation_raw: str) -> str:
-    """Limpia el formato de nacionalidad (ej: 'ma MAR' -> 'MAR' o 'us USA' -> 'USA')."""
+def format_nationality(nation_raw: str) -> str:
+    """Cleans country code representation (e.g. 'us USA' -> 'USA', 'ma MAR' -> 'MAR')."""
     if not nation_raw:
-        return "Desconocida"
-    partes = nation_raw.split()
-    return partes[-1] if len(partes) > 1 else nation_raw
+        return "Unknown"
+    parts = nation_raw.split()
+    return parts[-1] if len(parts) > 1 else nation_raw
 
 
-def formatear_competicion(comp_raw: str) -> str:
-    """Limpia el prefijo de país en la competición (ej: 'eng Premier League' -> 'la Premier League')."""
+def format_competition(comp_raw: str) -> str:
+    """Cleans national prefix from competition names (e.g. 'eng Premier League' -> 'the Premier League')."""
     if not comp_raw:
-        return "competición oficial"
-    # Quitar códigos de país de 2 o 3 letras minúsculas al inicio
-    limpio = re.sub(r'^[a-z]{2,3}\s+', '', comp_raw).strip()
-    if limpio.lower().startswith('la '):
-        return limpio
-    return f"la {limpio}"
+        return "official competition"
+    clean = re.sub(r'^[a-z]{2,3}\s+', '', comp_raw).strip()
+    if clean.lower().startswith('the '):
+        return clean
+    if clean in ['Premier League', 'Bundesliga']:
+        return f"the {clean}"
+    return clean
 
 
-def generar_text_profile(row: pd.Series, cols: dict) -> str:
+def generate_text_profile(row: pd.Series, cols: dict) -> str:
     """
-    Genera un perfil narrativo en español enriquecido con las estadísticas clave
-    más representativas del jugador, ideal para búsqueda semántica e indexación vectorial en AWS.
+    Generates a rich, descriptive natural language narrative profile in English,
+    tailored for semantic vector embeddings and AI scouting with Amazon Bedrock.
     """
-    nombre = limpiar_cadena(row.get(cols.get('Player')), default="Jugador")
-    edad = limpiar_entero(row.get(cols.get('Age')), default=0)
-    pos_codigo = limpiar_cadena(row.get(cols.get('Pos')), default="Sin posición")
-    posicion_es = POS_MAP.get(pos_codigo, pos_codigo)
-    equipo = limpiar_cadena(row.get(cols.get('Squad')), default="su equipo")
-    liga = formatear_competicion(limpiar_cadena(row.get(cols.get('Comp')), default=""))
-    nacionalidad = formatear_nacion(limpiar_cadena(row.get(cols.get('Nation')), default=""))
+    name = clean_str(row.get(cols.get('Player')), default="Player")
+    age = clean_int(row.get(cols.get('Age')), default=0)
+    pos_code = clean_str(row.get(cols.get('Pos')), default="Unknown position")
+    position_en = POS_MAP.get(pos_code, pos_code)
+    team = clean_str(row.get(cols.get('Squad')), default="their club")
+    league = format_competition(clean_str(row.get(cols.get('Comp')), default=""))
+    nationality = format_nationality(clean_str(row.get(cols.get('Nation')), default=""))
     
-    partidos = limpiar_entero(row.get(cols.get('MP')), default=0)
-    titularidades = limpiar_entero(row.get(cols.get('Starts')), default=0)
-    minutos = limpiar_entero(row.get(cols.get('Min')), default=0)
+    matches = clean_int(row.get(cols.get('MP')), default=0)
+    starts = clean_int(row.get(cols.get('Starts')), default=0)
+    minutes = clean_int(row.get(cols.get('Min')), default=0)
     
-    # Párrafo introductorio
-    edad_txt = f"de {edad} años" if edad > 0 else "de edad no informada"
-    pais_txt = f"de nacionalidad {nacionalidad}" if nacionalidad != "Desconocida" else "de nacionalidad no confirmada"
-    intro = f"{nombre} es un {posicion_es.lower()} {edad_txt}, {pais_txt}, que milita en el {equipo} de {liga}."
+    age_txt = f"{age}-year-old" if age > 0 else "player of unspecified age"
+    nat_txt = f"from {nationality}" if nationality != "Unknown" else "with unconfirmed nationality"
     
-    partidos_txt = "1 partido" if partidos == 1 else f"{partidos} partidos"
-    titulares_txt = "1 como titular" if titularidades == 1 else f"{titularidades} como titular"
-    minutos_txt = "1 minuto" if minutos == 1 else f"{minutos} minutos"
-    rodaje_txt = f"En la presente temporada ha disputado {partidos_txt} ({titulares_txt}), sumando un total de {minutos_txt} de juego."
+    # Indefinite article agreement (a vs an)
+    article = "an" if (str(age).startswith('8') or (age >= 11 and age <= 18)) else "a"
+    intro = f"{name} is {article} {age_txt} {position_en.lower()} {nat_txt} playing for {team} in {league}."
     
-    # Perfil diferenciado si es Portero o Jugador de campo
-    if 'GK' in pos_codigo:
-        paradas = limpiar_entero(row.get(cols.get('Saves')), default=0)
-        efectividad_paradas = limpiar_flotante(row.get(cols.get('Save%')), default=0.0)
-        goles_encajados = limpiar_entero(row.get(cols.get('GA')), default=0)
-        porterias_cero = limpiar_entero(row.get(cols.get('CS')), default=0)
+    matches_txt = "1 appearance" if matches == 1 else f"{matches} appearances"
+    starts_txt = "1 start" if starts == 1 else f"{starts} starts"
+    min_txt = "1 minute" if minutes == 1 else f"{minutes} minutes"
+    playing_time_txt = f"This season, he has recorded {matches_txt} ({starts_txt}), totaling {min_txt} on the pitch."
+    
+    # Differentiate narrative between Goalkeepers and Outfield Players
+    if 'GK' in pos_code:
+        saves = clean_int(row.get(cols.get('Saves')), default=0)
+        save_pct = clean_float(row.get(cols.get('Save%')), default=0.0)
+        goals_against = clean_int(row.get(cols.get('GA')), default=0)
+        clean_sheets = clean_int(row.get(cols.get('CS')), default=0)
         
-        paradas_txt = "1 parada" if paradas == 1 else f"{paradas} paradas"
-        goles_txt = "1 gol en contra" if goles_encajados == 1 else f"{goles_encajados} goles en contra"
-        cs_txt = "1 encuentro" if porterias_cero == 1 else f"{porterias_cero} encuentros"
+        saves_txt = "1 save" if saves == 1 else f"{saves} saves"
+        ga_txt = "1 goal conceded" if goals_against == 1 else f"{goals_against} goals conceded"
+        cs_txt = "1 clean sheet" if clean_sheets == 1 else f"{clean_sheets} clean sheets"
         
         stats_txt = (
-            f"Como guardameta, acumula {paradas_txt} con una efectividad del {efectividad_paradas:.1f}%, "
-            f"ha concedido {goles_txt} y ha mantenido su portería a cero en {cs_txt}."
+            f"As a goalkeeper, he has registered {saves_txt} with a {save_pct:.1f}% save rate, "
+            f"{ga_txt}, and kept {cs_txt}."
         )
     else:
-        goles = limpiar_entero(row.get(cols.get('Gls')), default=0)
-        asistencias = limpiar_entero(row.get(cols.get('Ast')), default=0)
-        disparos = limpiar_entero(row.get(cols.get('Sh')), default=0)
-        punteria = limpiar_flotante(row.get(cols.get('SoT%')), default=0.0)
-        tackles = limpiar_entero(row.get(cols.get('TklW')), default=0)
-        intercepciones = limpiar_entero(row.get(cols.get('Int')), default=0)
-        amarillas = limpiar_entero(row.get(cols.get('CrdY')), default=0)
+        goals = clean_int(row.get(cols.get('Gls')), default=0)
+        assists = clean_int(row.get(cols.get('Ast')), default=0)
+        shots = clean_int(row.get(cols.get('Sh')), default=0)
+        sot_pct = clean_float(row.get(cols.get('SoT%')), default=0.0)
+        tackles = clean_int(row.get(cols.get('TklW')), default=0)
+        interceptions = clean_int(row.get(cols.get('Int')), default=0)
+        yellows = clean_int(row.get(cols.get('CrdY')), default=0)
         
-        goles_txt = "1 gol" if goles == 1 else f"{goles} goles"
-        asist_txt = "1 asistencia" if asistencias == 1 else f"{asistencias} asistencias"
-        disparos_txt = "1 disparo total" if disparos == 1 else f"{disparos} disparos totales"
-        tackles_txt = "1 tackle ganado" if tackles == 1 else f"{tackles} tackles ganados"
-        interc_txt = "1 intercepción de balón" if intercepciones == 1 else f"{intercepciones} intercepciones de balón"
-        amarillas_txt = "1 tarjeta amarilla" if amarillas == 1 else f"{amarillas} tarjetas amarillas"
+        goals_txt = "1 goal" if goals == 1 else f"{goals} goals"
+        assists_txt = "1 assist" if assists == 1 else f"{assists} assists"
+        shots_txt = "1 total shot" if shots == 1 else f"{shots} total shots"
+        tackles_txt = "1 tackle won" if tackles == 1 else f"{tackles} tackles won"
+        interc_txt = "1 interception" if interceptions == 1 else f"{interceptions} interceptions"
+        yellows_txt = "1 yellow card" if yellows == 1 else f"{yellows} yellow cards"
         
         stats_txt = (
-            f"En su faceta ofensiva y de creación, registra {goles_txt} y {asist_txt}, "
-            f"con {disparos_txt} ({punteria:.1f}% dirigidos a portería). "
-            f"En labores defensivas y de contención, aporta {tackles_txt}, "
-            f"{interc_txt} y ha recibido {amarillas_txt}."
+            f"In attack and creation, he has tallied {goals_txt} and {assists_txt}, "
+            f"attempting {shots_txt} ({sot_pct:.1f}% on target). "
+            f"Defensively, he has delivered {tackles_txt}, {interc_txt}, and collected {yellows_txt}."
         )
 
-    return f"{intro} {rodaje_txt} {stats_txt}"
+    return f"{intro} {playing_time_txt} {stats_txt}"
 
 
-def procesar_jugadores(min_partidos_filtro: int | None = None) -> int:
+def process_players(min_matches_filter: int | None = None) -> int:
     """
-    Función principal de procesamiento del pipeline ETL para Scout AI.
+    Main ETL processing function for Scout AI data ingestion.
     """
     print("=" * 70)
-    print("[Scout AI] Iniciando pipeline de procesamiento de jugadores...")
+    print("[Scout AI] Starting player data processing pipeline...")
     print("=" * 70)
     
-    # 1. Resolver rutas de archivos
-    csv_path, json_path = resolver_rutas()
-    print(f"[+] Archivo de entrada:  {csv_path}")
-    print(f"[+] Archivo de salida:   {json_path}")
+    # 1. Resolve file paths
+    csv_path, json_path = resolve_paths()
+    print(f"[+] Input CSV:     {csv_path}")
+    print(f"[+] Output JSON:   {json_path}")
     
     if not csv_path.exists():
-        print(f"[ERROR] No se encontró el archivo CSV en la ruta: '{csv_path}'")
+        print(f"[ERROR] CSV file not found at: '{csv_path}'")
         sys.exit(1)
         
-    # 2. Detectar separador y codificación
-    delimitador, encoding = detectar_separador_y_encoding(csv_path)
-    print(f"[+] Detección de formato: Separador='{delimitador}', Codificación='{encoding}'")
+    # 2. Detect separator and encoding
+    delimiter, encoding = detect_separator_and_encoding(csv_path)
+    print(f"[+] Format detected: Delimiter='{delimiter}', Encoding='{encoding}'")
     
     try:
-        df = pd.read_csv(csv_path, sep=delimitador, encoding=encoding, engine='python')
+        df = pd.read_csv(csv_path, sep=delimiter, encoding=encoding, engine='python')
     except Exception as e:
-        print(f"[!] Aviso: Fallo en lectura primaria con engine='python': {e}. Usando fallback...")
-        df = pd.read_csv(csv_path, sep=delimitador, encoding='latin-1')
+        print(f"[!] Primary read with engine='python' failed: {e}. Falling back...")
+        df = pd.read_csv(csv_path, sep=delimiter, encoding='latin-1')
         
     total_original = len(df)
-    print(f"[+] Registros leídos en CSV original: {total_original} filas x {len(df.columns)} columnas.")
+    print(f"[+] Records loaded from original CSV: {total_original} rows x {len(df.columns)} columns.")
 
-    # 3. Mapear nombres de columnas existentes de forma tolerante a desajustes
+    # 3. Resilient column mapping
     cols = {
-        'id': buscar_columna(df, ['Rk', 'ID', 'Id', 'Rank', 'player_id']),
-        'Player': buscar_columna(df, ['Player', 'Jugador', 'Nombre', 'Name']),
-        'Age': buscar_columna(df, ['Age', 'Edad']),
-        'Nation': buscar_columna(df, ['Nation', 'Nacionalidad', 'Country', 'Pais']),
-        'Pos': buscar_columna(df, ['Pos', 'Position', 'Posicion']),
-        'Squad': buscar_columna(df, ['Squad', 'Equipo', 'Team', 'Club']),
-        'Comp': buscar_columna(df, ['Comp', 'Competicion', 'Liga', 'League']),
-        'MP': buscar_columna(df, ['MP', 'Matches Played', 'Matches_Played', 'PJ', 'Partidos']),
-        'Starts': buscar_columna(df, ['Starts', 'Titularidades', 'Titular']),
-        'Min': buscar_columna(df, ['Min', 'Minutos', 'Minutes']),
-        'Gls': buscar_columna(df, ['Gls', 'Goles', 'Goals']),
-        'Ast': buscar_columna(df, ['Ast', 'Asistencias', 'Assists']),
-        'Sh': buscar_columna(df, ['Sh', 'Tiros', 'Shots']),
-        'SoT%': buscar_columna(df, ['SoT%', 'SoT_pct', 'Punteria']),
-        'TklW': buscar_columna(df, ['TklW', 'Tackles', 'Entradas']),
-        'Int': buscar_columna(df, ['Int', 'Intercepciones', 'Interceptions']),
-        'CrdY': buscar_columna(df, ['CrdY', 'Tarjetas_Amarillas', 'Yellow_Cards']),
-        'Saves': buscar_columna(df, ['Saves', 'Paradas']),
-        'Save%': buscar_columna(df, ['Save%', 'Save_pct']),
-        'GA': buscar_columna(df, ['GA', 'Goles_Encajados']),
-        'CS': buscar_columna(df, ['CS', 'Porterias_Cero'])
+        'id': find_column(df, ['Rk', 'ID', 'Id', 'Rank', 'player_id']),
+        'Player': find_column(df, ['Player', 'Jugador', 'Nombre', 'Name']),
+        'Age': find_column(df, ['Age', 'Edad']),
+        'Nation': find_column(df, ['Nation', 'Nacionalidad', 'Country', 'Pais']),
+        'Pos': find_column(df, ['Pos', 'Position', 'Posicion']),
+        'Squad': find_column(df, ['Squad', 'Equipo', 'Team', 'Club']),
+        'Comp': find_column(df, ['Comp', 'Competicion', 'Liga', 'League']),
+        'MP': find_column(df, ['MP', 'Matches Played', 'Matches_Played', 'PJ', 'Partidos']),
+        'Starts': find_column(df, ['Starts', 'Titularidades', 'Titular']),
+        'Min': find_column(df, ['Min', 'Minutos', 'Minutes']),
+        'Gls': find_column(df, ['Gls', 'Goles', 'Goals']),
+        'Ast': find_column(df, ['Ast', 'Asistencias', 'Assists']),
+        'Sh': find_column(df, ['Sh', 'Tiros', 'Shots']),
+        'SoT%': find_column(df, ['SoT%', 'SoT_pct', 'Punteria']),
+        'TklW': find_column(df, ['TklW', 'Tackles', 'Entradas']),
+        'Int': find_column(df, ['Int', 'Intercepciones', 'Interceptions']),
+        'CrdY': find_column(df, ['CrdY', 'Tarjetas_Amarillas', 'Yellow_Cards']),
+        'Saves': find_column(df, ['Saves', 'Paradas']),
+        'Save%': find_column(df, ['Save%', 'Save_pct']),
+        'GA': find_column(df, ['GA', 'Goles_Encajados']),
+        'CS': find_column(df, ['CS', 'Porterias_Cero'])
     }
     
     col_mp = cols.get('MP')
     if not col_mp or col_mp not in df.columns:
-        print("[ERROR] No se pudo encontrar una columna equivalente a 'Matches Played' o 'MP'.")
+        print("[ERROR] Could not identify a matches played column ('MP' or equivalent).")
         sys.exit(1)
         
-    print(f"[+] Columna de partidos jugados identificada: '{col_mp}'")
+    print(f"[+] Matches played column identified: '{col_mp}'")
     
-    # Asegurar tipo numérico en columna MP
+    # Ensure numeric type
     df[col_mp] = pd.to_numeric(df[col_mp], errors='coerce').fillna(0).astype(int)
     
-    max_partidos_csv = int(df[col_mp].max())
-    min_partidos_csv = int(df[col_mp].min())
-    print(f"[+] Rango de partidos en el dataset: Mínimo={min_partidos_csv}, Máximo={max_partidos_csv}")
+    max_matches_csv = int(df[col_mp].max())
+    min_matches_csv = int(df[col_mp].min())
+    print(f"[+] Match appearances range in dataset: Min={min_matches_csv}, Max={max_matches_csv}")
 
-    # 4. Lógica del Filtro de Partidos Jugados (Análisis Data Engineer)
-    UMBRAL_OBJETIVO = 10
+    # 4. Filter logic (Data Engineer insight)
+    TARGET_MIN_MATCHES = 10
     
-    if min_partidos_filtro is not None:
-        umbral_a_usar = min_partidos_filtro
-        print(f"[+] Aplicando umbral manual especificado: >= {umbral_a_usar} partidos.")
-    elif max_partidos_csv < UMBRAL_OBJETIVO:
-        # DIAGNÓSTICO CLAVE:
-        # En este archivo 'jugadores_stats.csv', la temporada solo cuenta con un máximo de 6 partidos.
-        # Si se filtrara ciegamente por >= 10, devolvería 0 registros.
-        umbral_a_usar = min(2, max_partidos_csv)
-        print(f"[!] [AVISO DATA ENGINEER]: El valor máximo de '{col_mp}' en este CSV es {max_partidos_csv} (< {UMBRAL_OBJETIVO}).")
-        print(f"    Filtrar estrictamente por >= {UMBRAL_OBJETIVO} descartaría al 100% de los jugadores (0 registros).")
-        print(f"    -> Adaptando inteligentemente el filtro a >= {umbral_a_usar} partidos para conservar jugadores activos con minutos.")
+    if min_matches_filter is not None:
+        threshold_to_use = min_matches_filter
+        print(f"[+] Applying user-specified threshold: >= {threshold_to_use} matches.")
+    elif max_matches_csv < TARGET_MIN_MATCHES:
+        # DATA ENGINEER INSIGHT:
+        # Early-season dataset (max MP = 6 across all records).
+        # A rigid >= 10 filter would yield 0 records.
+        threshold_to_use = min(2, max_matches_csv)
+        print(f"[!] [DATA ENGINEER NOTICE]: Maximum '{col_mp}' in this CSV is {max_matches_csv} (< {TARGET_MIN_MATCHES}).")
+        print(f"    Strictly filtering by >= {TARGET_MIN_MATCHES} would discard 100% of players (0 records).")
+        print(f"    -> Intelligently adapting threshold to >= {threshold_to_use} matches to retain active players.")
     else:
-        umbral_a_usar = UMBRAL_OBJETIVO
-        print(f"[+] Filtrando jugadores con al menos {umbral_a_usar} partidos jugados...")
+        threshold_to_use = TARGET_MIN_MATCHES
+        print(f"[+] Filtering players with at least {threshold_to_use} matches played...")
 
-    df_filtrado = df[df[col_mp] >= umbral_a_usar].copy()
-    print(f"[+] Registros tras filtro de partidos (>= {umbral_a_usar}): {len(df_filtrado)} jugadores conservados.")
+    df_filtered = df[df[col_mp] >= threshold_to_use].copy()
+    print(f"[+] Records after filter (>= {threshold_to_use} matches): {len(df_filtered)} players retained.")
     
-    # 5. Generación de text_profile en español
-    print("[+] Generando columna 'text_profile' con descripciones enriquecidas en español...")
-    df_filtrado['text_profile'] = df_filtrado.apply(lambda row: generar_text_profile(row, cols), axis=1)
+    # 5. Generate English text_profile
+    print("[+] Generating 'text_profile' narrative column in English...")
+    df_filtered['text_profile'] = df_filtered.apply(lambda row: generate_text_profile(row, cols), axis=1)
     
-    # 6. Preparar DataFrame de exportación
-    # Identificador único de jugador
+    # 6. Prepare export DataFrame
     col_id = cols.get('id')
-    if col_id and col_id in df_filtrado.columns:
-        df_filtrado['id'] = df_filtrado[col_id].astype(str)
+    if col_id and col_id in df_filtered.columns:
+        df_filtered['id'] = df_filtered[col_id].astype(str)
     else:
-        df_filtrado['id'] = (df_filtrado.index + 1).astype(str)
+        df_filtered['id'] = (df_filtered.index + 1).astype(str)
         
     col_player = cols.get('Player', 'Player')
     col_pos = cols.get('Pos', 'Pos')
@@ -332,58 +333,59 @@ def procesar_jugadores(min_partidos_filtro: int | None = None) -> int:
     col_comp = cols.get('Comp', 'Comp')
     col_age = cols.get('Age', 'Age')
     
-    # Seleccionar columnas relevantes para la salida JSON
-    columnas_exportar = ['id']
-    if col_player in df_filtrado.columns:
-        df_filtrado['Player'] = df_filtrado[col_player].fillna('Desconocido')
-        columnas_exportar.append('Player')
-    if col_pos in df_filtrado.columns:
-        df_filtrado['Pos'] = df_filtrado[col_pos].fillna('')
-        columnas_exportar.append('Pos')
-    if col_squad in df_filtrado.columns:
-        df_filtrado['Squad'] = df_filtrado[col_squad].fillna('')
-        columnas_exportar.append('Squad')
-    if col_comp in df_filtrado.columns:
-        df_filtrado['Comp'] = df_filtrado[col_comp].fillna('')
-        columnas_exportar.append('Comp')
-    if col_age in df_filtrado.columns:
-        df_filtrado['Age'] = pd.to_numeric(df_filtrado[col_age], errors='coerce').fillna(0).astype(int)
-        columnas_exportar.append('Age')
-    if col_mp in df_filtrado.columns:
-        df_filtrado['MP'] = df_filtrado[col_mp]
-        columnas_exportar.append('MP')
+    export_columns = ['id']
+    if col_player in df_filtered.columns:
+        df_filtered['Player'] = df_filtered[col_player].fillna('Unknown')
+        export_columns.append('Player')
+    if col_pos in df_filtered.columns:
+        df_filtered['Pos'] = df_filtered[col_pos].fillna('')
+        export_columns.append('Pos')
+    if col_squad in df_filtered.columns:
+        df_filtered['Squad'] = df_filtered[col_squad].fillna('')
+        export_columns.append('Squad')
+    if col_comp in df_filtered.columns:
+        df_filtered['Comp'] = df_filtered[col_comp].fillna('')
+        export_columns.append('Comp')
+    if col_age in df_filtered.columns:
+        df_filtered['Age'] = pd.to_numeric(df_filtered[col_age], errors='coerce').fillna(0).astype(int)
+        export_columns.append('Age')
+    if col_mp in df_filtered.columns:
+        df_filtered['MP'] = df_filtered[col_mp]
+        export_columns.append('MP')
         
-    columnas_exportar.append('text_profile')
-    
-    resultado_df = df_filtrado[columnas_exportar]
+    export_columns.append('text_profile')
+    result_df = df_filtered[export_columns]
 
-    # 7. Exportar a JSON
-    print(f"[+] Exportando perfiles a '{json_path}'...")
+    # 7. Export to JSON
+    print(f"[+] Exporting profiles to '{json_path}'...")
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    resultado_df.to_json(json_path, orient='records', force_ascii=False, indent=2)
+    result_df.to_json(json_path, orient='records', force_ascii=False, indent=2)
     
     print("-" * 70)
-    print(f"[EXITO] Se procesaron y exportaron {len(resultado_df)} jugadores correctamente.")
-    print(f"[+] Archivo generado: {json_path}")
+    print(f"[SUCCESS] Processed and exported {len(result_df)} players successfully.")
+    print(f"[+] Output JSON file: {json_path}")
     print("=" * 70)
     
-    # Mostrar una muestra de verificación
-    if not resultado_df.empty:
-        muestra = resultado_df.iloc[0]
-        print(f"\n[Muestra de Perfil Generado - {muestra.get('Player')}]:")
-        print(f"{muestra.get('text_profile')}\n")
+    if not result_df.empty:
+        sample = result_df.iloc[0]
+        print(f"\n[Sample Generated Profile - {sample.get('Player')}]:")
+        print(f"{sample.get('text_profile')}\n")
 
-    return len(resultado_df)
+    return len(result_df)
+
+
+# Backward-compatible alias
+procesar_jugadores = process_players
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Procesador ETL de estadísticas de jugadores para Scout AI")
+    parser = argparse.ArgumentParser(description="Scout AI Player Data Ingestion Pipeline")
     parser.add_argument(
         "--min-matches",
         type=int,
         default=None,
-        help="Mínimo de partidos jugados para filtrar (por defecto adapta según datos si el máximo es < 10)"
+        help="Minimum matches played filter (automatically adapts if CSV maximum < 10)"
     )
     args = parser.parse_args()
     
-    procesar_jugadores(min_partidos_filtro=args.min_matches)
+    process_players(min_matches_filter=args.min_matches)
