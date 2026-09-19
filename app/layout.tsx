@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Scout AI · Inteligencia Táctica para Mercado de Fichajes",
+  title: "Scout AI · Tactical Intelligence for Football Transfers",
   description:
-    "Plataforma de scouting impulsada por IA generativa. Describe el perfil del jugador que buscas en lenguaje natural y encuentra los candidatos más compatibles.",
+    "Generative AI scouting platform powered by Amazon Bedrock. Describe player profiles in natural language and discover top tactical matches.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
